@@ -55,7 +55,17 @@ interface AppDeps {
   otel: OtelMetrics | null
 }
 
-function buildApp({ auth, characterService, chatService, providerService, fluxService, stripeService, configKV, env, otel }: AppDeps) {
+function buildApp({
+  auth,
+  characterService,
+  chatService,
+  providerService,
+  fluxService,
+  stripeService,
+  configKV,
+  env,
+  otel,
+}: AppDeps) {
   const logger = useLogger('app').useGlobalConfig()
 
   const app = new Hono<HonoEnv>()
@@ -215,7 +225,17 @@ async function createApp() {
   })
 
   await injeca.start()
-  const resolved = await injeca.resolve({ auth, characterService, chatService, providerService, fluxService, stripeService, configKV, otel, env: parsedEnv })
+  const resolved = await injeca.resolve({
+    auth,
+    characterService,
+    chatService,
+    providerService,
+    fluxService,
+    stripeService,
+    configKV,
+    otel,
+    env: parsedEnv,
+  })
   const app = buildApp({
     auth: resolved.auth,
     characterService: resolved.characterService,
