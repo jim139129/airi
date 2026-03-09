@@ -380,4 +380,60 @@ describe('javaScriptPlanner', () => {
     expect(planner.canEvaluateAsExpression('2 + 3')).toBe(true)
     expect(planner.canEvaluateAsExpression('const a = 1; a + 1')).toBe(false)
   })
+  it('translates Error objects thrown inside sync globals into the sandbox', async () => {
+    const planner = new JavaScriptPlanner()
+    const throwGlobals = {
+      ...globals,
+      getNoActionBudget: () => { throw new Error('Budget error') },
+    } as any
+    const executeAction = vi.fn(async action => `ok:${action.tool}`)
+    await expect(planner.evaluate('getNoActionBudget()', actions, throwGlobals, executeAction)).rejects.toThrow(/Budget error/)
+  })
+
+  it('translates exception strings thrown inside sync globals into the sandbox', async () => {
+    const planner = new JavaScriptPlanner()
+    const throwGlobals = {
+      ...globals,
+      getNoActionBudget: () => { throw 'String error' },
+    } as any
+    const executeAction = vi.fn(async action => `ok:${action.tool}`)
+    await expect(planner.evaluate('getNoActionBudget()', actions, throwGlobals, executeAction)).rejects.toThrow(/String error/)
+  })
+
+  it('gracefully handles returning undefined from tools without isolate copy errors', async () => {
+    const planner = new JavaScriptPlanner()
+    const undefGlobals = {
+      ...globals,
+      getNoActionBudget: () => undefined,
+    } as any
+    const executeAction = vi.fn(async action => `ok:${action.tool}`)
+    const planned = await planner.evaluate('return getNoActionBudget()', actions, undefGlobals, executeAction)
+    expect(planned.returnValue).toBeUndefined()
+  })
+
+  it('translates Error objects thrown inside async globals into the sandbox', async () => {
+    const planner = new JavaScriptPlanner()
+
+      // Test the async wrapper proxy logic explicitly
+      ; (planner as any).defineGlobalTool('failingAsync', async () => { throw new Error('Async error inside tool logic') })
+
+    const executeAction = vi.fn(async action => `ok:${action.tool}`)
+    // This should reject since failingAsync throws an Error via its ivm.Reference
+    const planned = await planner.evaluate(`
+      try {
+        await failingAsync()
+      } catch (err) {
+        return err.message
+      }
+    `, actions, globals, executeAction)
+    expect(planned.returnValue).toMatch(/Async error inside tool logic/)
+  })
+
+  it('handles executeAction failures explicitly as runtime errors', async () => {
+    const planner = new JavaScriptPlanner()
+    const planned = await planner.evaluate(`
+      await chat("hello");
+    `, actions, globals, async () => { throw new Error('Async execution failed entirely') })
+    expect(planned.actions[0]?.error).toBe('Async execution failed entirely')
+  })
 })

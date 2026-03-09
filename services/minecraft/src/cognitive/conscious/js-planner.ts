@@ -4,9 +4,9 @@ import type { ActionInstruction } from '../action/types'
 import type { BotEvent } from '../types'
 import type { PatternRuntime } from './patterns/types'
 
-import ivm from 'isolated-vm'
-
 import { inspect } from 'node:util'
+
+import ivm from 'isolated-vm'
 
 import { createQueryRuntime } from './query-dsl'
 
@@ -60,7 +60,8 @@ function deepFreeze<T>(value: T): T {
 }
 
 function toStructuredClone<T>(value: T): T {
-  if (value === undefined) return undefined as any
+  if (value === undefined)
+    return undefined as any
   return JSON.parse(JSON.stringify(value)) as T
 }
 
@@ -161,27 +162,30 @@ export class JavaScriptPlanner {
     this.bindRuntimeGlobals(globals, run)
 
     try {
-      let result;
+      let result
 
       try {
         if (scriptStr.includes('await ')) {
           const wrapped = `(async () => {\n${scriptStr}\n})()`
           const script = await this.isolate.compileScript(wrapped)
           result = await script.run(this.context, { timeout: this.timeoutMs, promise: true, copy: true })
-        } else {
+        }
+        else {
           const script = await this.isolate.compileScript(scriptStr)
           result = await script.run(this.context, { timeout: this.timeoutMs, copy: true })
           if (result instanceof Promise) {
-            result = await result;
+            result = await result
           }
         }
-      } catch (e: any) {
+      }
+      catch (e: any) {
         if (e.message && e.message.includes('Illegal return statement')) {
-           const wrapped = `(async () => {\n${scriptStr}\n})()`
-           const script = await this.isolate.compileScript(wrapped)
-           result = await script.run(this.context, { timeout: this.timeoutMs, promise: true, copy: true })
-        } else {
-           throw e
+          const wrapped = `(async () => {\n${scriptStr}\n})()`
+          const script = await this.isolate.compileScript(wrapped)
+          result = await script.run(this.context, { timeout: this.timeoutMs, promise: true, copy: true })
+        }
+        else {
+          throw e
         }
       }
 
@@ -202,7 +206,7 @@ export class JavaScriptPlanner {
       this.lastRun = {
         actions: run.executed,
         logs: run.logs,
-        returnRaw: result
+        returnRaw: result,
       }
       this.globalRef.setSync('lastRun', new ivm.ExternalCopy(this.lastRun).copyInto())
 
@@ -219,9 +223,10 @@ export class JavaScriptPlanner {
             throw new Error('Script execution timed out.')
           }
           if (err.message.includes('An object was thrown from supplied code')) {
-             throw new Error(err.message)
-          } else {
-             throw new Error(err.message)
+            throw new Error(err.message)
+          }
+          else {
+            throw new Error(err.message)
           }
         }
       }
@@ -230,30 +235,34 @@ export class JavaScriptPlanner {
     }
     finally {
       if (this.activeRun && (this.activeRun as any).trackedRefs) {
-         for (const ref of (this.activeRun as any).trackedRefs) {
-             try { ref.release() } catch (e) {}
-         }
+        for (const ref of (this.activeRun as any).trackedRefs) {
+          try { ref.release() }
+          catch (e) { }
+        }
       }
       this.activeRun = null
       this.clearActionTools(availableActions)
 
       try {
-        const llmLogRef = this.globalRef.getSync('$llmLog');
+        const llmLogRef = this.globalRef.getSync('$llmLog')
         if (llmLogRef instanceof ivm.Reference) {
-           llmLogRef.release();
+          llmLogRef.release()
         }
-      } catch(e) {}
+      }
+      catch (e) { }
 
       // Release query function references
       if (globals.mineflayer) {
-         try {
-           const queryKeys = Object.keys(createQueryRuntime(globals.mineflayer));
-           for (const k of queryKeys) {
-              const r = this.globalRef.getSync(`$query_${k}`);
-              if (r instanceof ivm.Reference) r.release();
-              this.globalRef.deleteSync(`$query_${k}`);
-           }
-         } catch(e) {}
+        try {
+          const queryKeys = Object.keys(createQueryRuntime(globals.mineflayer))
+          for (const k of queryKeys) {
+            const r = this.globalRef.getSync(`$query_${k}`)
+            if (r instanceof ivm.Reference)
+              r.release()
+            this.globalRef.deleteSync(`$query_${k}`)
+          }
+        }
+        catch (e) { }
       }
     }
   }
@@ -362,12 +371,12 @@ export class JavaScriptPlanner {
       'lastRun': this.lastRun,
       'prevRun': this.lastRun ?? null,
       'lastAction': this.lastAction,
-      'skip': () => {},
-      'use': () => {},
-      'log': () => {},
-      'expect': () => {},
-      'expectMoved': () => {},
-      'expectNear': () => {},
+      'skip': () => { },
+      'use': () => { },
+      'log': () => { },
+      'expect': () => { },
+      'expectMoved': () => { },
+      'expectNear': () => { },
       'setNoActionBudget': globals.setNoActionBudget,
       'getNoActionBudget': globals.getNoActionBudget,
       'forget_conversation': globals.forgetConversation,
@@ -533,11 +542,12 @@ export class JavaScriptPlanner {
     for (const action of availableActions) {
       this.context.evalSync(`delete globalThis["${action.name}"];`)
       try {
-        const ref = this.globalRef.getSync(`$${action.name}`);
+        const ref = this.globalRef.getSync(`$${action.name}`)
         if (ref instanceof ivm.Reference) {
-          ref.release();
+          ref.release()
         }
-      } catch (e) {}
+      }
+      catch (e) { }
       this.globalRef.deleteSync(`$${action.name}`)
     }
   }
@@ -554,7 +564,8 @@ export class JavaScriptPlanner {
     const setSync = (key: string, val: any) => {
       if (val === undefined) {
         this.globalRef.deleteSync(key)
-      } else {
+      }
+      else {
         this.globalRef.setSync(key, new ivm.ExternalCopy(val).copyInto())
       }
     }
@@ -575,10 +586,11 @@ export class JavaScriptPlanner {
     if (globals.llmLog && typeof globals.llmLog === 'object' && typeof (globals.llmLog as any).query === 'function') {
       this.globalRef.setSync('$llmLog', new ivm.Reference((...args: any[]) => {
         try {
-          const res = (globals.llmLog as any).query(...args);
-          return new ivm.ExternalCopy(res ? res.list() : []).copyInto();
-        } catch {
-          return undefined;
+          const res = (globals.llmLog as any).query(...args)
+          return new ivm.ExternalCopy(res ? res.list() : []).copyInto()
+        }
+        catch {
+          return undefined
         }
       }))
       this.context.evalSync(`
@@ -588,13 +600,15 @@ export class JavaScriptPlanner {
           }
         };
       `)
-    } else if (typeof globals.llmLog === 'function') {
+    }
+    else if (typeof globals.llmLog === 'function') {
       const llmLogRef = new ivm.Reference((...args: any[]) => {
         try {
-          const res = (globals.llmLog as Function)(...args);
-          return new ivm.ExternalCopy(res ? res.list() : []).copyInto();
-        } catch {
-          return undefined;
+          const res = (globals.llmLog as Function)(...args)
+          return new ivm.ExternalCopy(res ? res.list() : []).copyInto()
+        }
+        catch {
+          return undefined
         }
       })
       this.globalRef.setSync('$llmLog', llmLogRef)
@@ -603,7 +617,8 @@ export class JavaScriptPlanner {
           return globalThis['$llmLog'].applySync(undefined, args, { arguments: { copy: true }, result: { copy: true } });
         }
       `)
-    } else {
+    }
+    else {
       setSync('llmLog', globals.llmLog ?? null)
     }
 
@@ -615,7 +630,7 @@ export class JavaScriptPlanner {
     setSync('llmUserMessage', llmInput?.userMessage ?? '')
     setSync('llmConversationHistory', llmInput?.conversationHistory ?? [])
 
-    const trackedRefs: ivm.Reference<any>[] = [];
+    const trackedRefs: ivm.Reference<any>[] = []
 
     // Expose query object functions
     if (globals.mineflayer) {
@@ -624,17 +639,18 @@ export class JavaScriptPlanner {
       for (const [key, val] of Object.entries(query)) {
         if (typeof val === 'function') {
           const ref = new ivm.Reference((...args: any[]) => {
-             try {
-                const res = (val as Function)(...args);
-                if (res && typeof res.list === 'function') {
-                  return new ivm.ExternalCopy(res.list()).copyInto();
-                }
-                return new ivm.ExternalCopy(res).copyInto();
-             } catch (e) {
-                return undefined;
-             }
-          });
-          trackedRefs.push(ref);
+            try {
+              const res = (val as Function)(...args)
+              if (res && typeof res.list === 'function') {
+                return new ivm.ExternalCopy(res.list()).copyInto()
+              }
+              return new ivm.ExternalCopy(res).copyInto()
+            }
+            catch (e) {
+              return undefined
+            }
+          })
+          trackedRefs.push(ref)
           this.globalRef.setSync(`$query_${key}`, ref)
           boundQuery[key] = true
         }
@@ -645,16 +661,17 @@ export class JavaScriptPlanner {
           ${Object.keys(boundQuery).map(k => `${k}: (...args) => globalThis['$query_${k}'].applySync(undefined, args, { arguments: { copy: true }, result: { copy: true } })`).join(',\n          ')}
         };
       `)
-    } else {
+    }
+    else {
       this.globalRef.deleteSync('query')
       this.context.evalSync(`delete globalThis.query;`)
     }
 
     if (globals.bot) {
-       setSync('bot', { username: (globals.bot as any).username })
+      setSync('bot', { username: (globals.bot as any).username })
     }
     if (globals.mineflayer) {
-       setSync('mineflayer', { version: (globals.mineflayer as any).bot?.version })
+      setSync('mineflayer', { version: (globals.mineflayer as any).bot?.version })
     }
 
     const bindFunc = (name: string, fn: Function | null | undefined) => {
@@ -663,7 +680,7 @@ export class JavaScriptPlanner {
           const res = fn(...args)
           return res !== undefined ? new ivm.ExternalCopy(res).copyInto() : undefined
         })
-        trackedRefs.push(ref);
+        trackedRefs.push(ref)
         this.globalRef.setSync(`$${name}`, ref)
         this.context.evalSync(`
             globalThis["${name}"] = (...args) => {
@@ -671,7 +688,8 @@ export class JavaScriptPlanner {
                 return r.applySync(undefined, args, { arguments: { copy: true }, result: { copy: true } });
             }
         `)
-      } else {
+      }
+      else {
         this.globalRef.deleteSync(`$${name}`)
         this.context.evalSync(`delete globalThis["${name}"];`)
       }
@@ -688,7 +706,7 @@ export class JavaScriptPlanner {
         get: new ivm.Reference((...args: any[]) => new ivm.ExternalCopy(globals.patterns!.get!(...args)).copyInto()),
         find: new ivm.Reference((...args: any[]) => new ivm.ExternalCopy(globals.patterns!.find!(...args)).copyInto()),
         ids: new ivm.Reference((...args: any[]) => new ivm.ExternalCopy(globals.patterns!.ids!(...args)).copyInto()),
-        list: new ivm.Reference((...args: any[]) => new ivm.ExternalCopy(globals.patterns!.list!(...args)).copyInto())
+        list: new ivm.Reference((...args: any[]) => new ivm.ExternalCopy(globals.patterns!.list!(...args)).copyInto()),
       }
       trackedRefs.push(patternsRef.get, patternsRef.find, patternsRef.ids, patternsRef.list)
       this.globalRef.setSync('$patternsGet', patternsRef.get)
@@ -703,7 +721,8 @@ export class JavaScriptPlanner {
           list: (...args) => $patternsList.applySync(undefined, args, { result: { copy: true }, arguments: { copy: true } })
         };
       `)
-    } else {
+    }
+    else {
       this.globalRef.deleteSync('patterns')
     }
 
@@ -716,7 +735,7 @@ export class JavaScriptPlanner {
 
     this.globalRef.setSync('mem', new ivm.ExternalCopy(this.mem).copyInto())
 
-    ;(run as any).trackedRefs = trackedRefs;
+    ; (run as any).trackedRefs = trackedRefs
   }
 
   private mapArgsToParams(action: Action, args: unknown[]): Record<string, unknown> {
@@ -844,15 +863,20 @@ export class JavaScriptPlanner {
         try {
           const res = await fn(...args)
           return res !== undefined ? new ivm.ExternalCopy(res).copyInto() : undefined
-        } catch (err: any) {
-          throw new ivm.ExternalCopy({ message: err instanceof Error ? err.message : String(err) }).copyInto()
+        }
+        catch (err: any) {
+          return new ivm.ExternalCopy({ __error: err instanceof Error ? err.message : String(err) }).copyInto()
         }
       }))
       this.context.evalSync(`
           globalThis["${name}"] = async (...args) => {
               const ref = globalThis['$${name}'];
               try {
-                return await ref.apply(undefined, args, { arguments: { copy: true }, result: { promise: true, copy: true } });
+                const res = await ref.apply(undefined, args, { arguments: { copy: true }, result: { promise: true, copy: true } });
+                if (res && typeof res === 'object' && res.__error) {
+                  throw new Error(res.__error);
+                }
+                return res;
               } catch (err) {
                 if (err && typeof err === 'object' && err.message) {
                   throw new Error(err.message);
@@ -861,12 +885,14 @@ export class JavaScriptPlanner {
               }
           }
       `)
-    } else {
+    }
+    else {
       this.globalRef.setSync(`$${name}`, new ivm.Reference((...args: any[]) => {
         try {
           const res = fn(...args)
           return res !== undefined ? new ivm.ExternalCopy(res).copyInto() : undefined
-        } catch (err: any) {
+        }
+        catch (err: any) {
           return new ivm.ExternalCopy({ __error: err instanceof Error ? err.message : String(err) }).copyInto()
         }
       }))
