@@ -24,6 +24,7 @@
     "crossws": "catalog:",
     "es-toolkit": "^1.44.0",
     "eventemitter3": "^5.0.4",
+    "isolated-vm": "catalog:",
     "minecraft-data": "3.102.3",
     "mineflayer": "^4.33.0",
     "mineflayer-armor-manager": "^2.0.1",

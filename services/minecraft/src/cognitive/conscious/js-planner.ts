@@ -4,7 +4,7 @@ import type { ActionInstruction } from '../action/types'
 import type { BotEvent } from '../types'
 import type { PatternRuntime } from './patterns/types'
 
-import vm from 'node:vm'
+import ivm from 'isolated-vm'
 
 import { inspect } from 'node:util'
 
@@ -60,6 +60,7 @@ function deepFreeze<T>(value: T): T {
 }
 
 function toStructuredClone<T>(value: T): T {
+  if (value === undefined) return undefined as any
   return JSON.parse(JSON.stringify(value)) as T
 }
 
@@ -117,17 +118,25 @@ export function extractJavaScriptCandidate(input: string): string {
 }
 
 export class JavaScriptPlanner {
-  private readonly context: vm.Context
   private activeRun: ActivePlannerRun | null = null
   private readonly maxActionsPerTurn: number
-  private readonly sandbox: Record<string, unknown>
   private readonly timeoutMs: number
+
+  private isolate: ivm.Isolate
+  private context: ivm.Context
+  private globalRef: ivm.Reference<any>
+  private mem: Record<string, unknown> = {}
+  private lastRun: any = null
+  private lastAction: any = null
 
   constructor(options: JavaScriptPlannerOptions = {}) {
     this.timeoutMs = options.timeoutMs ?? 750
     this.maxActionsPerTurn = options.maxActionsPerTurn ?? 5
-    this.sandbox = {}
-    this.context = vm.createContext(this.sandbox)
+
+    this.isolate = new ivm.Isolate({ memoryLimit: 128 })
+    this.context = this.isolate.createContextSync()
+    this.globalRef = this.context.global
+
     this.installBuiltins()
   }
 
@@ -137,7 +146,7 @@ export class JavaScriptPlanner {
     globals: RuntimeGlobals,
     executeAction: (action: ActionInstruction) => Promise<unknown>,
   ): Promise<JavaScriptRunResult> {
-    const script = extractJavaScriptCandidate(content)
+    const scriptStr = extractJavaScriptCandidate(content)
     const run: ActivePlannerRun = {
       actionCount: 0,
       actionsByName: new Map(availableActions.map(action => [action.name, action])),
@@ -152,8 +161,29 @@ export class JavaScriptPlanner {
     this.bindRuntimeGlobals(globals, run)
 
     try {
-      const wrapped = `(async () => {\n${script}\n})()`
-      const result = await new vm.Script(wrapped).runInContext(this.context, { timeout: this.timeoutMs })
+      let result;
+
+      try {
+        if (scriptStr.includes('await ')) {
+          const wrapped = `(async () => {\n${scriptStr}\n})()`
+          const script = await this.isolate.compileScript(wrapped)
+          result = await script.run(this.context, { timeout: this.timeoutMs, promise: true, copy: true })
+        } else {
+          const script = await this.isolate.compileScript(scriptStr)
+          result = await script.run(this.context, { timeout: this.timeoutMs, copy: true })
+          if (result instanceof Promise) {
+            result = await result;
+          }
+        }
+      } catch (e: any) {
+        if (e.message && e.message.includes('Illegal return statement')) {
+           const wrapped = `(async () => {\n${scriptStr}\n})()`
+           const script = await this.isolate.compileScript(wrapped)
+           result = await script.run(this.context, { timeout: this.timeoutMs, promise: true, copy: true })
+        } else {
+           throw e
+        }
+      }
 
       const returnValue = typeof result === 'undefined'
         ? undefined
@@ -164,9 +194,17 @@ export class JavaScriptPlanner {
             maxStringLength: 10_000,
           })
 
-      if (isRecord(this.sandbox.lastRun)) {
-        this.sandbox.lastRun.returnRaw = result
+      const memRef = this.globalRef.getSync('mem')
+      if (memRef && memRef.copySync) {
+        this.mem = memRef.copySync()
       }
+
+      this.lastRun = {
+        actions: run.executed,
+        logs: run.logs,
+        returnRaw: result
+      }
+      this.globalRef.setSync('lastRun', new ivm.ExternalCopy(this.lastRun).copyInto())
 
       return {
         actions: run.executed,
@@ -174,18 +212,59 @@ export class JavaScriptPlanner {
         returnValue,
       }
     }
+    catch (err: any) {
+      if (err && typeof err === 'object') {
+        if (err.message) {
+          if (err.message.includes('Script execution timed out')) {
+            throw new Error('Script execution timed out.')
+          }
+          if (err.message.includes('An object was thrown from supplied code')) {
+             throw new Error(err.message)
+          } else {
+             throw new Error(err.message)
+          }
+        }
+      }
+
+      throw new Error(String(err.message || err))
+    }
     finally {
+      if (this.activeRun && (this.activeRun as any).trackedRefs) {
+         for (const ref of (this.activeRun as any).trackedRefs) {
+             try { ref.release() } catch (e) {}
+         }
+      }
       this.activeRun = null
+      this.clearActionTools(availableActions)
+
+      try {
+        const llmLogRef = this.globalRef.getSync('$llmLog');
+        if (llmLogRef instanceof ivm.Reference) {
+           llmLogRef.release();
+        }
+      } catch(e) {}
+
+      // Release query function references
+      if (globals.mineflayer) {
+         try {
+           const queryKeys = Object.keys(createQueryRuntime(globals.mineflayer));
+           for (const k of queryKeys) {
+              const r = this.globalRef.getSync(`$query_${k}`);
+              if (r instanceof ivm.Reference) r.release();
+              this.globalRef.deleteSync(`$query_${k}`);
+           }
+         } catch(e) {}
+      }
     }
   }
 
   public canEvaluateAsExpression(content: string): boolean {
-    const script = extractJavaScriptCandidate(content)
-    if (!script.trim())
+    const scriptStr = extractJavaScriptCandidate(content)
+    if (!scriptStr.trim())
       return false
 
     try {
-      void new vm.Script(`(async () => (\n${script}\n))()`)
+      this.isolate.compileScriptSync(`(async () => (\n${scriptStr}\n))()`)
       return true
     }
     catch {
@@ -279,22 +358,22 @@ export class JavaScriptPlanner {
       'patterns.list': globals.patterns?.list,
       'bot': globals.bot ?? globals.mineflayer?.bot,
       'mineflayer': globals.mineflayer ?? null,
-      'mem': this.sandbox.mem,
-      'lastRun': this.sandbox.lastRun,
-      'prevRun': this.sandbox.prevRun,
-      'lastAction': this.sandbox.lastAction,
-      'skip': this.sandbox.skip,
-      'use': this.sandbox.use,
-      'log': this.sandbox.log,
-      'expect': this.sandbox.expect,
-      'expectMoved': this.sandbox.expectMoved,
-      'expectNear': this.sandbox.expectNear,
-      'setNoActionBudget': this.sandbox.setNoActionBudget,
-      'getNoActionBudget': this.sandbox.getNoActionBudget,
-      'forget_conversation': this.sandbox.forget_conversation,
-      'enterContext': this.sandbox.enterContext,
-      'exitContext': this.sandbox.exitContext,
-      'history': this.sandbox.history,
+      'mem': this.mem,
+      'lastRun': this.lastRun,
+      'prevRun': this.lastRun ?? null,
+      'lastAction': this.lastAction,
+      'skip': () => {},
+      'use': () => {},
+      'log': () => {},
+      'expect': () => {},
+      'expectMoved': () => {},
+      'expectNear': () => {},
+      'setNoActionBudget': globals.setNoActionBudget,
+      'getNoActionBudget': globals.getNoActionBudget,
+      'forget_conversation': globals.forgetConversation,
+      'enterContext': globals.enterContext,
+      'exitContext': globals.exitContext,
+      'history': globals.history,
     }
 
     if (includeBuiltins) {
@@ -320,8 +399,16 @@ export class JavaScriptPlanner {
   }
 
   private installBuiltins(): void {
+    this.context.evalSync(`
+      globalThis.console = {
+        log: () => {},
+        error: () => {},
+        warn: () => {}
+      };
+    `)
+
     this.defineGlobalTool('skip', async () => this.runAction('skip', {}))
-    this.defineGlobalTool('use', (toolName: unknown, params?: unknown) => {
+    this.defineGlobalTool('use', async (toolName: unknown, params?: unknown) => {
       if (typeof toolName !== 'string' || toolName.length === 0) {
         throw new Error('use(toolName, params) requires a non-empty string toolName')
       }
@@ -412,76 +499,224 @@ export class JavaScriptPlanner {
       const detail = message ?? `Expected distance <= ${maxDist}, got ${distance}`
       throw new Error(`Expectation failed: ${detail}`)
     })
-    this.defineGlobalValue('mem', {})
+
+    this.context.evalSync(`globalThis.mem = {};`)
   }
 
   private getLastActionResultRecord(): Record<string, unknown> | null {
-    const lastAction = this.sandbox.lastAction
-    if (!isRecord(lastAction))
+    if (!isRecord(this.lastAction))
       return null
 
-    const result = lastAction.result
+    const result = this.lastAction.result
     return isRecord(result) ? result : null
   }
 
   private installActionTools(availableActions: Action[]): void {
     for (const action of availableActions) {
-      const existing = Object.getOwnPropertyDescriptor(this.sandbox, action.name)
-      if (existing && existing.configurable === false)
-        continue
-
-      this.defineUpdatableGlobal(action.name, async (...args: unknown[]) => {
+      const toolRef = new ivm.Reference(async (...args: unknown[]) => {
         const params = this.mapArgsToParams(action, args)
-        return this.runAction(action.name, params)
+        const res = await this.runAction(action.name, params)
+        return new ivm.ExternalCopy(res).copyInto()
       })
+      this.globalRef.setSync(`$${action.name}`, toolRef)
+
+      this.context.evalSync(`
+          globalThis["${action.name}"] = async (...args) => {
+              const ref = globalThis['$${action.name}'];
+              return ref.apply(undefined, args, { arguments: { copy: true }, result: { promise: true, copy: true } });
+          }
+      `)
+    }
+  }
+
+  private clearActionTools(availableActions: Action[]): void {
+    for (const action of availableActions) {
+      this.context.evalSync(`delete globalThis["${action.name}"];`)
+      try {
+        const ref = this.globalRef.getSync(`$${action.name}`);
+        if (ref instanceof ivm.Reference) {
+          ref.release();
+        }
+      } catch (e) {}
+      this.globalRef.deleteSync(`$${action.name}`)
     }
   }
 
   private bindRuntimeGlobals(globals: RuntimeGlobals, run: ActivePlannerRun): void {
-    const snapshot = deepFreeze(toStructuredClone(globals.snapshot))
-    const event = deepFreeze(toStructuredClone(globals.event))
-    const llmInput = deepFreeze(toStructuredClone(globals.llmInput ?? null))
-    const currentInput = deepFreeze(toStructuredClone(globals.currentInput ?? null))
-    const actionQueue = deepFreeze(toStructuredClone(globals.actionQueue ?? null))
-    const noActionBudget = deepFreeze(toStructuredClone(globals.noActionBudget ?? null))
-    const errorBurstGuard = deepFreeze(toStructuredClone(globals.errorBurstGuard ?? null))
-    const query = globals.mineflayer ? createQueryRuntime(globals.mineflayer) : undefined
+    const snapshot = toStructuredClone(globals.snapshot)
+    const event = toStructuredClone(globals.event)
+    const llmInput = toStructuredClone(globals.llmInput ?? null)
+    const currentInput = toStructuredClone(globals.currentInput ?? null)
+    const actionQueue = toStructuredClone(globals.actionQueue ?? null)
+    const noActionBudget = toStructuredClone(globals.noActionBudget ?? null)
+    const errorBurstGuard = toStructuredClone(globals.errorBurstGuard ?? null)
 
-    this.sandbox.prevRun = this.sandbox.lastRun ?? null
-    this.sandbox.snapshot = snapshot
-    this.sandbox.event = event
-    this.sandbox.now = Date.now()
-    this.sandbox.self = snapshot.self
-    this.sandbox.environment = snapshot.environment
-    this.sandbox.social = snapshot.social
-    this.sandbox.threat = snapshot.threat
-    this.sandbox.attention = snapshot.attention
-    this.sandbox.autonomy = snapshot.autonomy
-    this.sandbox.llmInput = llmInput
-    this.sandbox.currentInput = currentInput
-    this.sandbox.llmLog = globals.llmLog ?? null
-    this.sandbox.actionQueue = actionQueue
-    this.sandbox.noActionBudget = noActionBudget
-    this.sandbox.errorBurstGuard = errorBurstGuard
-    this.sandbox.setNoActionBudget = globals.setNoActionBudget ?? null
-    this.sandbox.getNoActionBudget = globals.getNoActionBudget ?? null
-    this.sandbox.forget_conversation = globals.forgetConversation ?? null
-    this.sandbox.enterContext = globals.enterContext ?? null
-    this.sandbox.exitContext = globals.exitContext ?? null
-    this.sandbox.history = globals.history ?? null
-    this.sandbox.llmMessages = llmInput?.messages ?? []
-    this.sandbox.llmSystemPrompt = llmInput?.systemPrompt ?? ''
-    this.sandbox.llmUserMessage = llmInput?.userMessage ?? ''
-    this.sandbox.llmConversationHistory = llmInput?.conversationHistory ?? []
-    this.sandbox.query = query
-    this.sandbox.patterns = globals.patterns ?? null
-    this.sandbox.bot = globals.bot ?? globals.mineflayer?.bot ?? null
-    this.sandbox.mineflayer = globals.mineflayer ?? null
-    this.sandbox.lastRun = {
+    const setSync = (key: string, val: any) => {
+      if (val === undefined) {
+        this.globalRef.deleteSync(key)
+      } else {
+        this.globalRef.setSync(key, new ivm.ExternalCopy(val).copyInto())
+      }
+    }
+
+    setSync('prevRun', this.lastRun ?? null)
+    setSync('snapshot', snapshot)
+    setSync('event', event)
+    setSync('now', Date.now())
+    setSync('self', snapshot.self)
+    setSync('environment', snapshot.environment)
+    setSync('social', snapshot.social)
+    setSync('threat', snapshot.threat)
+    setSync('attention', snapshot.attention)
+    setSync('autonomy', snapshot.autonomy)
+    setSync('llmInput', llmInput)
+    setSync('currentInput', currentInput)
+
+    if (globals.llmLog && typeof globals.llmLog === 'object' && typeof (globals.llmLog as any).query === 'function') {
+      this.globalRef.setSync('$llmLog', new ivm.Reference((...args: any[]) => {
+        try {
+          const res = (globals.llmLog as any).query(...args);
+          return new ivm.ExternalCopy(res ? res.list() : []).copyInto();
+        } catch {
+          return undefined;
+        }
+      }))
+      this.context.evalSync(`
+        globalThis.llmLog = {
+          query: (...args) => {
+            return globalThis['$llmLog'].applySync(undefined, args, { arguments: { copy: true }, result: { copy: true } });
+          }
+        };
+      `)
+    } else if (typeof globals.llmLog === 'function') {
+      const llmLogRef = new ivm.Reference((...args: any[]) => {
+        try {
+          const res = (globals.llmLog as Function)(...args);
+          return new ivm.ExternalCopy(res ? res.list() : []).copyInto();
+        } catch {
+          return undefined;
+        }
+      })
+      this.globalRef.setSync('$llmLog', llmLogRef)
+      this.context.evalSync(`
+        globalThis.llmLog = (...args) => {
+          return globalThis['$llmLog'].applySync(undefined, args, { arguments: { copy: true }, result: { copy: true } });
+        }
+      `)
+    } else {
+      setSync('llmLog', globals.llmLog ?? null)
+    }
+
+    setSync('actionQueue', actionQueue)
+    setSync('noActionBudget', noActionBudget)
+    setSync('errorBurstGuard', errorBurstGuard)
+    setSync('llmMessages', llmInput?.messages ?? [])
+    setSync('llmSystemPrompt', llmInput?.systemPrompt ?? '')
+    setSync('llmUserMessage', llmInput?.userMessage ?? '')
+    setSync('llmConversationHistory', llmInput?.conversationHistory ?? [])
+
+    const trackedRefs: ivm.Reference<any>[] = [];
+
+    // Expose query object functions
+    if (globals.mineflayer) {
+      const query = createQueryRuntime(globals.mineflayer) as any
+      const boundQuery: Record<string, unknown> = {}
+      for (const [key, val] of Object.entries(query)) {
+        if (typeof val === 'function') {
+          const ref = new ivm.Reference((...args: any[]) => {
+             try {
+                const res = (val as Function)(...args);
+                if (res && typeof res.list === 'function') {
+                  return new ivm.ExternalCopy(res.list()).copyInto();
+                }
+                return new ivm.ExternalCopy(res).copyInto();
+             } catch (e) {
+                return undefined;
+             }
+          });
+          trackedRefs.push(ref);
+          this.globalRef.setSync(`$query_${key}`, ref)
+          boundQuery[key] = true
+        }
+      }
+
+      this.context.evalSync(`
+        globalThis.query = {
+          ${Object.keys(boundQuery).map(k => `${k}: (...args) => globalThis['$query_${k}'].applySync(undefined, args, { arguments: { copy: true }, result: { copy: true } })`).join(',\n          ')}
+        };
+      `)
+    } else {
+      this.globalRef.deleteSync('query')
+      this.context.evalSync(`delete globalThis.query;`)
+    }
+
+    if (globals.bot) {
+       setSync('bot', { username: (globals.bot as any).username })
+    }
+    if (globals.mineflayer) {
+       setSync('mineflayer', { version: (globals.mineflayer as any).bot?.version })
+    }
+
+    const bindFunc = (name: string, fn: Function | null | undefined) => {
+      if (fn) {
+        const ref = new ivm.Reference((...args: any[]) => {
+          const res = fn(...args)
+          return res !== undefined ? new ivm.ExternalCopy(res).copyInto() : undefined
+        })
+        trackedRefs.push(ref);
+        this.globalRef.setSync(`$${name}`, ref)
+        this.context.evalSync(`
+            globalThis["${name}"] = (...args) => {
+                const r = globalThis['$${name}'];
+                return r.applySync(undefined, args, { arguments: { copy: true }, result: { copy: true } });
+            }
+        `)
+      } else {
+        this.globalRef.deleteSync(`$${name}`)
+        this.context.evalSync(`delete globalThis["${name}"];`)
+      }
+    }
+
+    bindFunc('setNoActionBudget', globals.setNoActionBudget)
+    bindFunc('getNoActionBudget', globals.getNoActionBudget)
+    bindFunc('forget_conversation', globals.forgetConversation)
+    bindFunc('enterContext', globals.enterContext)
+    bindFunc('exitContext', globals.exitContext)
+
+    if (globals.patterns) {
+      const patternsRef = {
+        get: new ivm.Reference((...args: any[]) => new ivm.ExternalCopy(globals.patterns!.get!(...args)).copyInto()),
+        find: new ivm.Reference((...args: any[]) => new ivm.ExternalCopy(globals.patterns!.find!(...args)).copyInto()),
+        ids: new ivm.Reference((...args: any[]) => new ivm.ExternalCopy(globals.patterns!.ids!(...args)).copyInto()),
+        list: new ivm.Reference((...args: any[]) => new ivm.ExternalCopy(globals.patterns!.list!(...args)).copyInto())
+      }
+      trackedRefs.push(patternsRef.get, patternsRef.find, patternsRef.ids, patternsRef.list)
+      this.globalRef.setSync('$patternsGet', patternsRef.get)
+      this.globalRef.setSync('$patternsFind', patternsRef.find)
+      this.globalRef.setSync('$patternsIds', patternsRef.ids)
+      this.globalRef.setSync('$patternsList', patternsRef.list)
+      this.context.evalSync(`
+        globalThis.patterns = {
+          get: (...args) => $patternsGet.applySync(undefined, args, { result: { copy: true }, arguments: { copy: true } }),
+          find: (...args) => $patternsFind.applySync(undefined, args, { result: { copy: true }, arguments: { copy: true } }),
+          ids: (...args) => $patternsIds.applySync(undefined, args, { result: { copy: true }, arguments: { copy: true } }),
+          list: (...args) => $patternsList.applySync(undefined, args, { result: { copy: true }, arguments: { copy: true } })
+        };
+      `)
+    } else {
+      this.globalRef.deleteSync('patterns')
+    }
+
+    setSync('lastRun', {
       actions: run.executed,
       logs: run.logs,
       returnRaw: undefined,
-    }
+    })
+    setSync('lastAction', this.lastAction)
+
+    this.globalRef.setSync('mem', new ivm.ExternalCopy(this.mem).copyInto())
+
+    ;(run as any).trackedRefs = trackedRefs;
   }
 
   private mapArgsToParams(action: Action, args: unknown[]): Record<string, unknown> {
@@ -537,7 +772,8 @@ export class JavaScriptPlanner {
         result: 'Skipped turn',
       }
       this.activeRun.executed.push(runtimeResult)
-      this.sandbox.lastAction = runtimeResult
+      this.lastAction = runtimeResult
+      this.globalRef.setSync('lastAction', new ivm.ExternalCopy(this.lastAction).copyInto())
       return runtimeResult
     }
 
@@ -549,7 +785,8 @@ export class JavaScriptPlanner {
         error: validation.error ?? `Invalid tool parameters for ${tool}`,
       }
       this.activeRun.executed.push(runtimeResult)
-      this.sandbox.lastAction = runtimeResult
+      this.lastAction = runtimeResult
+      this.globalRef.setSync('lastAction', new ivm.ExternalCopy(this.lastAction).copyInto())
       return runtimeResult
     }
     const action = validation.action
@@ -562,7 +799,8 @@ export class JavaScriptPlanner {
         result,
       }
       this.activeRun.executed.push(runtimeResult)
-      this.sandbox.lastAction = runtimeResult
+      this.lastAction = runtimeResult
+      this.globalRef.setSync('lastAction', new ivm.ExternalCopy(this.lastAction).copyInto())
       return runtimeResult
     }
     catch (error) {
@@ -572,7 +810,8 @@ export class JavaScriptPlanner {
         error: error instanceof Error ? error.message : String(error),
       }
       this.activeRun.executed.push(runtimeResult)
-      this.sandbox.lastAction = runtimeResult
+      this.lastAction = runtimeResult
+      this.globalRef.setSync('lastAction', new ivm.ExternalCopy(this.lastAction).copyInto())
       return runtimeResult
     }
   }
@@ -598,32 +837,50 @@ export class JavaScriptPlanner {
     return { action: { tool, params: parsed.data } }
   }
 
-  private defineGlobalTool(name: string, fn: (...args: unknown[]) => unknown): void {
-    this.defineGlobalValue(name, fn)
-  }
-
-  private defineGlobalValue(name: string, value: unknown): void {
-    if (Object.prototype.hasOwnProperty.call(this.sandbox, name))
-      return
-
-    Object.defineProperty(this.sandbox, name, {
-      value,
-      configurable: false,
-      enumerable: true,
-      writable: false,
-    })
-  }
-
-  // NOTICE: Action tools must be updatable because the set of available actions
-  // can change at runtime. Unlike builtins (which are immutable), action tool
-  // globals use configurable: true so they can be redefined on each evaluate().
-  private defineUpdatableGlobal(name: string, value: unknown): void {
-    Object.defineProperty(this.sandbox, name, {
-      value,
-      configurable: true,
-      enumerable: true,
-      writable: false,
-    })
+  private defineGlobalTool(name: string, fn: (...args: any[]) => any): void {
+    const isAsync = fn.constructor.name === 'AsyncFunction'
+    if (isAsync) {
+      this.globalRef.setSync(`$${name}`, new ivm.Reference(async (...args: any[]) => {
+        try {
+          const res = await fn(...args)
+          return res !== undefined ? new ivm.ExternalCopy(res).copyInto() : undefined
+        } catch (err: any) {
+          throw new ivm.ExternalCopy({ message: err instanceof Error ? err.message : String(err) }).copyInto()
+        }
+      }))
+      this.context.evalSync(`
+          globalThis["${name}"] = async (...args) => {
+              const ref = globalThis['$${name}'];
+              try {
+                return await ref.apply(undefined, args, { arguments: { copy: true }, result: { promise: true, copy: true } });
+              } catch (err) {
+                if (err && typeof err === 'object' && err.message) {
+                  throw new Error(err.message);
+                }
+                throw new Error(String(err));
+              }
+          }
+      `)
+    } else {
+      this.globalRef.setSync(`$${name}`, new ivm.Reference((...args: any[]) => {
+        try {
+          const res = fn(...args)
+          return res !== undefined ? new ivm.ExternalCopy(res).copyInto() : undefined
+        } catch (err: any) {
+          return new ivm.ExternalCopy({ __error: err instanceof Error ? err.message : String(err) }).copyInto()
+        }
+      }))
+      this.context.evalSync(`
+          globalThis["${name}"] = (...args) => {
+              const ref = globalThis['$${name}'];
+              const res = ref.applySync(undefined, args, { arguments: { copy: true }, result: { copy: true } });
+              if (res && typeof res === 'object' && res.__error) {
+                throw new Error(res.__error);
+              }
+              return res;
+          }
+      `)
+    }
   }
 
   private previewValue(value: unknown): string {
