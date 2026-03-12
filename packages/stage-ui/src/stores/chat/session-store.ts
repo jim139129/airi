@@ -359,8 +359,11 @@ export const useChatSessionStore = defineStore('chat-session', () => {
   function ensureSession(sessionId: string) {
     ensureGeneration(sessionId)
     if (!sessionMessages.value[sessionId] || sessionMessages.value[sessionId].length === 0) {
+      // Only set in-memory defaults as a placeholder.
+      // Do NOT persist here — the session may exist in IndexDB but hasn't been loaded yet.
+      // Persisting would overwrite stored messages (including user messages) with system-only defaults.
+      // Real sessions are persisted through createSession; loaded sessions get their data from loadSession.
       sessionMessages.value[sessionId] = [generateInitialMessage()]
-      void persistSession(sessionId)
     }
   }
 
@@ -368,9 +371,12 @@ export const useChatSessionStore = defineStore('chat-session', () => {
     get: () => {
       if (!activeSessionId.value)
         return []
-      ensureSession(activeSessionId.value)
+      // Load session from IndexDB first (async, no-op if already loaded),
+      // then ensure defaults. ensureSession provides synchronous in-memory
+      // placeholder so the getter always returns an array.
       if (ready.value)
         void loadSession(activeSessionId.value)
+      ensureSession(activeSessionId.value)
       return sessionMessages.value[activeSessionId.value] ?? []
     },
     set: (value) => {
@@ -383,7 +389,6 @@ export const useChatSessionStore = defineStore('chat-session', () => {
 
   function setActiveSession(sessionId: string) {
     activeSessionId.value = sessionId
-    ensureSession(sessionId)
 
     const characterId = getCurrentCharacterId()
     const characterIndex = index.value?.characters[characterId]
@@ -392,8 +397,15 @@ export const useChatSessionStore = defineStore('chat-session', () => {
       void persistIndex()
     }
 
-    if (ready.value)
-      void loadSession(sessionId)
+    // Load session from IndexDB first, then ensure defaults.
+    // This prevents ensureSession from setting placeholder messages
+    // before real data is loaded.
+    if (ready.value) {
+      void loadSession(sessionId).then(() => ensureSession(sessionId))
+    }
+    else {
+      ensureSession(sessionId)
+    }
   }
 
   function cleanupMessages(sessionId = activeSessionId.value) {
