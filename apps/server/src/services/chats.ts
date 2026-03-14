@@ -100,30 +100,38 @@ export function createChatService(db: Database) {
           ...members.filter(member => member.type !== 'user'),
         ]
 
+        const existingMembers = await tx.query.chatMembers.findMany({
+          where: eq(schema.chatMembers.chatId, chatId),
+        })
+
+        const existingMemberSignatures = new Set(
+          existingMembers.map(m => `${m.memberType}:${m.memberType === 'user' ? m.userId : m.characterId}`)
+        )
+
+        const newMembersToInsert: (typeof schema.chatMembers.$inferInsert)[] = []
+
         for (const member of desiredMembers) {
           if (member.type === 'user' && !member.userId)
             continue
           if (member.type === 'character' && !member.characterId)
             continue
 
-          const existingMember = await tx.query.chatMembers.findFirst({
-            where: and(
-              eq(schema.chatMembers.chatId, chatId),
-              eq(schema.chatMembers.memberType, member.type),
-              member.type === 'user'
-                ? eq(schema.chatMembers.userId, member.userId!)
-                : eq(schema.chatMembers.characterId, member.characterId!),
-            ),
-          })
+          const signature = `${member.type}:${member.type === 'user' ? member.userId : member.characterId}`
 
-          if (!existingMember) {
-            await tx.insert(schema.chatMembers).values({
+          if (!existingMemberSignatures.has(signature)) {
+            newMembersToInsert.push({
               chatId,
               memberType: member.type,
               userId: member.type === 'user' ? member.userId : null,
               characterId: member.type === 'character' ? member.characterId : null,
             })
+            // Add to set to prevent duplicate inserts in the same request
+            existingMemberSignatures.add(signature)
           }
+        }
+
+        if (newMembersToInsert.length > 0) {
+          await tx.insert(schema.chatMembers).values(newMembersToInsert)
         }
 
         if (payload.messages.length > 0) {
