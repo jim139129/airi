@@ -73,6 +73,23 @@ describe('createOpenAICompatibleValidators', () => {
     )
   })
 
+  it('connectivity check adds /v1/ for root OpenAI-compatible gateway URLs', async () => {
+    const [connectivityValidator] = getProviderValidators({
+      checks: [ProviderValidationCheck.Connectivity],
+    })
+
+    const result = await connectivityValidator.validator({
+      apiKey: 'test-key',
+      baseUrl: 'https://skybridge-api.com/',
+    }, provider, providerExtra, { t: mockT })
+
+    expect(result.valid).toBe(true)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://skybridge-api.com/v1/models',
+      expect.objectContaining({ method: 'GET' }),
+    )
+  })
+
   it('connectivity check fails on network error', async () => {
     fetchMock.mockRejectedValue(new TypeError('fetch failed'))
 
@@ -143,6 +160,27 @@ describe('createOpenAICompatibleValidators', () => {
     expect(result.valid).toBe(true)
     expect(generateTextMock).toHaveBeenCalledWith(expect.objectContaining({
       model: 'seed-2-0-pro-260328',
+    }))
+  })
+
+  it('chat probing adds /v1/ for root OpenAI-compatible gateway URLs', async () => {
+    listModelsMock.mockResolvedValue([
+      { id: 'codex-auto-review' },
+    ])
+
+    const [, chatValidator] = getProviderValidators({
+      checks: [ProviderValidationCheck.Connectivity, ProviderValidationCheck.ChatCompletions],
+    })
+
+    const result = await chatValidator.validator({
+      apiKey: 'test-key',
+      baseUrl: 'https://skybridge-api.com/',
+    }, provider, providerExtra, { t: mockT })
+
+    expect(result.valid).toBe(true)
+    expect(generateTextMock).toHaveBeenCalledWith(expect.objectContaining({
+      baseURL: 'https://skybridge-api.com/v1/',
+      model: 'codex-auto-review',
     }))
   })
 })

@@ -8,6 +8,7 @@ import { listModels } from '@xsai/model'
 import { message } from '@xsai/utils-chat'
 import { Mutex } from 'es-toolkit'
 
+import { normalizeOpenAICompatibleBaseUrl } from '../openaiCompatibleBaseUrl'
 import { isModelProvider, ProviderValidationCheck } from '../types'
 
 interface OpenAICompatibleValidationOptions<TConfig extends { apiKey?: string, baseUrl?: string }> {
@@ -78,7 +79,7 @@ async function resolveModels<TConfig extends { apiKey?: string | null, baseUrl?:
     return providerExtra.listModels(config, provider)
   }
   if (!isModelProvider(provider)) {
-    return listModels({ baseURL: config.baseUrl!, apiKey: config.apiKey! })
+    return listModels({ baseURL: normalizeOpenAICompatibleBaseUrl(config.baseUrl!), apiKey: config.apiKey! })
   }
 
   return listModels(provider.model())
@@ -136,7 +137,7 @@ export function createOpenAICompatibleValidators<TConfig extends { apiKey?: stri
     try {
       await generateText({
         apiKey: config.apiKey,
-        baseURL: config.baseUrl!,
+        baseURL: normalizeOpenAICompatibleBaseUrl(config.baseUrl!),
         headers: additionalHeaders,
         model: normalizedModel,
         messages: message.messages(message.user('ping')),
@@ -242,7 +243,7 @@ export function createOpenAICompatibleValidators<TConfig extends { apiKey?: stri
       schedule: options?.schedule,
       validator: async (config) => {
         const errors: Array<{ error: unknown }> = []
-        const baseUrl = String(config.baseUrl ?? '')
+        const baseUrl = normalizeOpenAICompatibleBaseUrl(config.baseUrl ?? '')
         const modelsUrl = baseUrl.endsWith('/') ? `${baseUrl}models` : `${baseUrl}/models`
         const controller = new AbortController()
         const timeout = setTimeout(() => controller.abort(), 10_000)

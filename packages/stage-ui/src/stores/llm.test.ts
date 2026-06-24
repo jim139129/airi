@@ -9,11 +9,13 @@ import { useLlmToolsStore } from './llm-tools'
 
 const {
   streamTextMock,
+  listModelsMock,
   mcpMock,
   debugMock,
   createSparkCommandToolMock,
 } = vi.hoisted(() => ({
   streamTextMock: vi.fn(),
+  listModelsMock: vi.fn(),
   mcpMock: vi.fn(async (): Promise<Tool[]> => []),
   debugMock: vi.fn(async (): Promise<Tool[]> => []),
   createSparkCommandToolMock: vi.fn(async (): Promise<unknown> => [{
@@ -25,7 +27,7 @@ const {
 }))
 
 vi.mock('@xsai/model', () => ({
-  listModels: vi.fn(),
+  listModels: listModelsMock,
 }))
 
 vi.mock('@xsai/stream-text', () => ({
@@ -74,6 +76,7 @@ function toolNameFrom(tool: unknown) {
 describe('isToolRelatedError', () => {
   beforeEach(() => {
     streamTextMock.mockReset()
+    listModelsMock.mockReset()
     mcpMock.mockClear()
     debugMock.mockClear()
     createSparkCommandToolMock.mockClear()
@@ -340,5 +343,25 @@ describe('isToolRelatedError', () => {
 
     const mergedTools = streamTextMock.mock.calls[0]?.[0]?.tools
     expect(mergedTools?.map(toolNameFrom)).toContain('runtime_pending_tool')
+  })
+})
+
+describe('useLLM models', () => {
+  beforeEach(() => {
+    listModelsMock.mockReset()
+    setActivePinia(createPinia())
+  })
+
+  it('adds /v1/ when listing models from a root OpenAI-compatible gateway URL', async () => {
+    listModelsMock.mockResolvedValueOnce([{ id: 'codex-auto-review' }])
+
+    const store = useLLM()
+    const models = await store.models('https://skybridge-api.com/', 'test-key')
+
+    expect(models).toEqual([{ id: 'codex-auto-review' }])
+    expect(listModelsMock).toHaveBeenCalledWith({
+      apiKey: 'test-key',
+      baseURL: 'https://skybridge-api.com/v1/',
+    })
   })
 })

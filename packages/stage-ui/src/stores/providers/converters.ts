@@ -5,6 +5,7 @@ import type { ProviderMetadata } from '../providers'
 
 import { listModels } from '@xsai/model'
 
+import { normalizeOpenAICompatibleBaseUrl } from '../../libs/providers/openaiCompatibleBaseUrl'
 import { resolveProviderSourceMetadata } from '../../libs/providers/source-metadata'
 import { CHAT_COMPLETIONS_VALIDATOR_ID, isModelProvider } from '../../libs/providers/types'
 import { getValidatorsOfProvider, validateProvider } from '../../libs/providers/validators/run'
@@ -148,7 +149,7 @@ export function convertProviderDefinitionToMetadata(
               return mapModelsToMetadataModels(definition.id, models as any[])
             }
 
-            const baseUrl = typeof (config as any).baseUrl === 'string' ? (config as any).baseUrl.trim() : ''
+            const baseUrl = normalizeOpenAICompatibleBaseUrl((config as any).baseUrl)
             const apiKey = typeof (config as any).apiKey === 'string' ? (config as any).apiKey.trim() : ''
             if (!baseUrl)
               return []

@@ -9,6 +9,7 @@ import { uniqBy } from 'es-toolkit'
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 
+import { normalizeOpenAICompatibleBaseUrl } from '../libs/providers/openaiCompatibleBaseUrl'
 import { createSparkCommandTool, debug, mcp } from '../tools'
 import { useLlmToolsStore } from './llm-tools'
 import { useModsServerChannelStore } from './mods/api/channel-server'
@@ -108,7 +109,7 @@ export const useLLM = defineStore('llm', () => {
 
     try {
       return await listModels({
-        baseURL: (apiUrl.endsWith('/') ? apiUrl : `${apiUrl}/`) as `${string}/`,
+        baseURL: normalizeOpenAICompatibleBaseUrl(apiUrl) as `${string}/`,
         apiKey,
       })
     }
